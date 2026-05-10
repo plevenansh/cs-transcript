@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from os import getenv
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
 
@@ -11,6 +12,7 @@ from youtube_transcript_api._errors import (
     TranscriptsDisabled,
     VideoUnavailable,
 )
+from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
 
 
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
@@ -121,8 +123,36 @@ def _fetch_segments(transcript):
     return transcript
 
 
+def _proxy_config_from_env():
+    proxy_url = getenv("PROXY_URL")
+    if proxy_url:
+        return GenericProxyConfig(http_url=proxy_url, https_url=proxy_url)
+
+    webshare_username = getenv("WEBSHARE_PROXY_USERNAME")
+    webshare_password = getenv("WEBSHARE_PROXY_PASSWORD")
+    if webshare_username and webshare_password:
+        countries = [
+            country.strip()
+            for country in getenv("WEBSHARE_PROXY_COUNTRIES", "").split(",")
+            if country.strip()
+        ]
+        retries = int(getenv("WEBSHARE_PROXY_RETRIES", "10"))
+        return WebshareProxyConfig(
+            proxy_username=webshare_username,
+            proxy_password=webshare_password,
+            filter_ip_locations=countries or None,
+            retries_when_blocked=retries,
+        )
+
+    return None
+
+
+def _youtube_api() -> YouTubeTranscriptApi:
+    return YouTubeTranscriptApi(proxy_config=_proxy_config_from_env())
+
+
 def _list_transcripts(video_id: str):
-    api = YouTubeTranscriptApi()
+    api = _youtube_api()
     try:
         return api.list(video_id)
     except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable) as exc:

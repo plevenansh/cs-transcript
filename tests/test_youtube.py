@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.youtube import extract_video_id, normalize_languages
+from app.youtube import _proxy_config_from_env, extract_video_id, normalize_languages
 
 
 @pytest.mark.parametrize(
@@ -28,3 +28,10 @@ def test_extract_video_id_rejects_invalid_value():
 def test_normalize_languages_uses_priority_order():
     assert normalize_languages("en, hi,es", ["en"]) == ["en", "hi", "es"]
     assert normalize_languages(None, ["en"]) == ["en"]
+
+
+def test_proxy_url_env_creates_proxy_config(monkeypatch):
+    monkeypatch.setenv("PROXY_URL", "http://user:pass@example.com:8080")
+    proxy_config = _proxy_config_from_env()
+    assert proxy_config is not None
+    assert proxy_config.to_requests_dict()["http"] == "http://user:pass@example.com:8080"

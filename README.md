@@ -58,8 +58,30 @@ Formats: `json`, `text`, `srt`, `vtt`.
    - `API_TOKEN=<long-random-secret>`
    - `DEFAULT_LANGUAGES=en`
    - `ALLOWED_ORIGINS=https://your-site.com,https://another-site.com` if browser apps will call the API directly
+   - `PROXY_URL=http://username:password@proxy-host:port` if YouTube blocks Railway IPs
 5. Generate a public domain from the API service Networking settings.
 6. Deploy. Railway uses `railway.toml` to run `uvicorn` and health-check `/healthz`.
+
+## Proxy support
+
+YouTube can block cloud or datacenter IPs, including Railway. If that happens, configure a proxy provider and redeploy.
+
+Generic proxy:
+
+```text
+PROXY_URL=http://username:password@proxy-host:port
+```
+
+Webshare rotating residential proxy:
+
+```text
+WEBSHARE_PROXY_USERNAME=<proxy-username>
+WEBSHARE_PROXY_PASSWORD=<proxy-password>
+WEBSHARE_PROXY_COUNTRIES=US,IN
+WEBSHARE_PROXY_RETRIES=10
+```
+
+Use rotating residential proxies for best reliability. Static datacenter IPs are more likely to remain blocked by YouTube.
 
 ## Calling from other sites
 
