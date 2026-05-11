@@ -87,7 +87,8 @@ def normalize_languages(languages: str | list[str] | None, default_languages: li
         values = [item.strip() for item in languages]
     else:
         values = default_languages
-    return [value for value in values if value] or default_languages
+    normalized = [value for value in values if value and value.lower() != "auto"]
+    return normalized or default_languages
 
 
 def language_cache_key(languages: list[str]) -> str:
@@ -96,8 +97,8 @@ def language_cache_key(languages: list[str]) -> str:
 
 def is_explicit_language_request(languages: str | list[str] | None) -> bool:
     if isinstance(languages, str):
-        return bool(languages.strip())
-    return bool(languages)
+        return bool(normalize_languages(languages, []))
+    return bool(normalize_languages(languages, [])) if languages else False
 
 
 def _segment_to_dict(segment) -> dict:
@@ -124,7 +125,12 @@ def _fetch_segments(transcript):
 
 
 def _proxy_config_from_env():
-    proxy_url = getenv("PROXY_URL")
+    proxy_url = (getenv("PROXY_URL") or "").strip()
+    if proxy_url in {
+        "http://username:password@proxy-host:port",
+        "https://username:password@proxy-host:port",
+    }:
+        proxy_url = ""
     if proxy_url:
         return GenericProxyConfig(http_url=proxy_url, https_url=proxy_url)
 

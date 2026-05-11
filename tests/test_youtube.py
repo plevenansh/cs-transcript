@@ -28,6 +28,7 @@ def test_extract_video_id_rejects_invalid_value():
 def test_normalize_languages_uses_priority_order():
     assert normalize_languages("en, hi,es", ["en"]) == ["en", "hi", "es"]
     assert normalize_languages(None, ["en"]) == ["en"]
+    assert normalize_languages("Auto", ["en"]) == ["en"]
 
 
 def test_proxy_url_env_creates_proxy_config(monkeypatch):
@@ -35,3 +36,10 @@ def test_proxy_url_env_creates_proxy_config(monkeypatch):
     proxy_config = _proxy_config_from_env()
     assert proxy_config is not None
     assert proxy_config.to_requests_dict()["http"] == "http://user:pass@example.com:8080"
+
+
+def test_placeholder_proxy_url_is_ignored(monkeypatch):
+    monkeypatch.setenv("PROXY_URL", "http://username:password@proxy-host:port")
+    monkeypatch.delenv("WEBSHARE_PROXY_USERNAME", raising=False)
+    monkeypatch.delenv("WEBSHARE_PROXY_PASSWORD", raising=False)
+    assert _proxy_config_from_env() is None
