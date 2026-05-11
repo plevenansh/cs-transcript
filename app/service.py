@@ -64,3 +64,12 @@ def get_or_fetch_transcript(
     session.add(row)
     session.flush()
     return _response_from_fetch(fetched)
+
+
+def get_uncached_transcript(
+    video_id: str,
+    languages: list[str],
+    allow_any_language: bool = False,
+) -> TranscriptResponse:
+    fetched = fetch_transcript(video_id, languages, allow_any_language=allow_any_language)
+    return _response_from_fetch(fetched)

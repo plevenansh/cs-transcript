@@ -5,6 +5,7 @@ from app.database import session_scope
 from app.models import TranscriptCache
 import app.main
 from app.youtube import AvailableTranscript, FetchedTranscript
+from sqlalchemy.exc import OperationalError
 
 
 def test_healthz(client):
@@ -129,6 +130,33 @@ def test_blank_language_request_allows_any_available_transcript(client, monkeypa
     assert response.status_code == 200
     assert response.json()["language_code"] == "hi"
     assert calls == [("dQw4w9WgXcQ", ["en"], True)]
+
+
+def test_database_failure_falls_back_to_uncached_fetch(client, monkeypatch):
+    def fail_session_scope(session_factory):
+        raise OperationalError("select 1", {}, Exception("database unavailable"))
+
+    def fake_fetch(video_id, languages, allow_any_language=False):
+        return FetchedTranscript(
+            video_id=video_id,
+            language="Hindi",
+            language_code="hi",
+            is_generated=True,
+            segments=[{"text": "Fallback", "start": 0.0, "duration": 1.0}],
+            text="Fallback",
+        )
+
+    monkeypatch.setattr(app.main, "session_scope", fail_session_scope)
+    monkeypatch.setattr(app.service, "fetch_transcript", fake_fetch)
+
+    response = client.get(
+        "/api/transcripts/dQw4w9WgXcQ",
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "Fallback"
+    assert response.json()["source"] == "youtube"
 
 
 def test_available_languages_endpoint(client, monkeypatch):

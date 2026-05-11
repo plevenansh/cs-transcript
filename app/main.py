@@ -17,7 +17,7 @@ from app.database import Base, make_engine, make_session_factory, session_scope
 from app.formatters import FORMATTERS
 from app.models import ApiRequestLog
 from app.schemas import ErrorResponse
-from app.service import get_or_fetch_transcript
+from app.service import get_or_fetch_transcript, get_uncached_transcript
 from app.youtube import (
     TranscriptServiceError,
     extract_video_id,
@@ -286,6 +286,13 @@ def _handle_transcript(
                 language_priority,
                 allow_any_language=not explicit_languages,
             )
+    except SQLAlchemyError as exc:
+        print(f"Transcript cache unavailable, fetching without cache: {exc}", file=stderr)
+        return get_uncached_transcript(
+            video_id,
+            language_priority,
+            allow_any_language=not explicit_languages,
+        )
     except TranscriptServiceError as exc:
         status_code = status.HTTP_424_FAILED_DEPENDENCY if exc.error == "youtube_blocked" else status.HTTP_404_NOT_FOUND
         raise HTTPException(
