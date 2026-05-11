@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from json import JSONDecodeError
+import os
 import re
+import tempfile
 from os import getenv
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
@@ -204,6 +206,24 @@ def _proxy_config_from_env():
     return None
 
 
+_cached_cookies_file: str | None = None
+
+
+def _get_cookies_file() -> str | None:
+    """Write YOUTUBE_COOKIES env var to a temp file once and return the path."""
+    global _cached_cookies_file
+    if _cached_cookies_file is not None:
+        return _cached_cookies_file if os.path.exists(_cached_cookies_file) else None
+    cookies_content = (getenv("YOUTUBE_COOKIES") or "").strip()
+    if not cookies_content:
+        return None
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+    tmp.write(cookies_content)
+    tmp.close()
+    _cached_cookies_file = tmp.name
+    return _cached_cookies_file
+
+
 def _youtube_api() -> YouTubeTranscriptApi:
     return YouTubeTranscriptApi(proxy_config=_proxy_config_from_env())
 
@@ -337,6 +357,9 @@ def _fetch_yt_dlp_payload(video_id: str, languages: list[str], allow_any_languag
     }
     if proxy_url:
         options["proxy"] = proxy_url
+    cookies_file = _get_cookies_file()
+    if cookies_file:
+        options["cookiefile"] = cookies_file
 
     with YoutubeDL(options) as downloader:
         info = downloader.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
