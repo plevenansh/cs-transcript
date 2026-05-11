@@ -5,4 +5,4 @@ psycopg[binary]==3.3.4
 pydantic-settings==2.7.1
 python-multipart==0.0.20
 youtube-transcript-api==1.2.4
-yt-dlp==2026.4.30
+yt-dlp==2026.3.17
