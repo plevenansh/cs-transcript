@@ -20,8 +20,8 @@ def require_api_token(
     transcript_token: str | None = Cookie(default=None),
 ) -> None:
     settings: Settings = request.app.state.settings
-    expected = settings.api_token
-    provided = _extract_bearer_token(authorization) or transcript_token
+    expected = settings.normalized_api_token
+    provided = (_extract_bearer_token(authorization) or transcript_token or "").strip()
 
     if not expected:
         raise HTTPException(

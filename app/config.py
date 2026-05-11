@@ -17,6 +17,10 @@ class Settings(BaseSettings):
         return [item.strip() for item in self.default_languages.split(",") if item.strip()]
 
     @property
+    def normalized_api_token(self) -> str:
+        return self.api_token.strip()
+
+    @property
     def cors_origins(self) -> list[str]:
         return [item.strip() for item in self.allowed_origins.split(",") if item.strip()]
 

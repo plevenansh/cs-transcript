@@ -193,9 +193,21 @@ def test_vtt_format(client):
 
 
 def test_web_login_sets_cookie(client):
-    response = client.post("/login", data={"token": "test-token"}, follow_redirects=False)
+    response = client.post("/login", data={"token": " test-token\n"}, follow_redirects=False)
     assert response.status_code == 303
     assert "transcript_token" in response.headers["set-cookie"]
+
+
+def test_web_login_shows_error_for_wrong_token(client):
+    response = client.post("/login", data={"token": "wrong"}, follow_redirects=True)
+    assert response.status_code == 200
+    assert "Access token did not match" in response.text
+
+
+def test_config_status_shows_token_configured(client):
+    response = client.get("/api/config/status")
+    assert response.status_code == 200
+    assert response.json()["api_token_configured"] is True
 
 
 def test_web_transcript_error_renders_html(client, monkeypatch):

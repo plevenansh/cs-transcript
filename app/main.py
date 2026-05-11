@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from os import getenv
 from time import perf_counter
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse
@@ -80,15 +81,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
-        is_authenticated = request.cookies.get("transcript_token") == settings.api_token and bool(settings.api_token)
-        return HTMLResponse(_render_page(is_authenticated=is_authenticated))
+        is_authenticated = (
+            (request.cookies.get("transcript_token") or "").strip() == settings.normalized_api_token
+            and bool(settings.normalized_api_token)
+        )
+        login_error = "Access token did not match the configured API_TOKEN." if request.query_params.get("login_error") else ""
+        return HTMLResponse(_render_page(is_authenticated=is_authenticated, error=login_error))
 
     @app.post("/login")
     def login(token: str = Form(...)) -> RedirectResponse:
-        response = RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
-        if token == settings.api_token and settings.api_token:
-            response.set_cookie("transcript_token", token, httponly=True, samesite="lax")
+        submitted_token = token.strip()
+        if submitted_token == settings.normalized_api_token and settings.normalized_api_token:
+            response = RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+            response.set_cookie("transcript_token", submitted_token, httponly=True, samesite="lax")
         else:
+            response = RedirectResponse("/?login_error=1", status_code=status.HTTP_303_SEE_OTHER)
             response.set_cookie("transcript_token", "", max_age=0)
         return response
 
@@ -97,6 +104,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response = RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
         response.delete_cookie("transcript_token")
         return response
+
+    @app.get("/api/config/status")
+    def config_status() -> dict[str, bool]:
+        return {
+            "api_token_configured": bool(settings.normalized_api_token),
+            "database_url_configured": bool(settings.database_url),
+            "proxy_configured": bool(
+                getenv("PROXY_URL")
+                or (getenv("WEBSHARE_PROXY_USERNAME") and getenv("WEBSHARE_PROXY_PASSWORD"))
+            ),
+        }
 
     @app.get("/api/transcripts/{video_id}", dependencies=[Depends(require_api_token)])
     def transcript(video_id: str, request: Request, languages: str | None = None):
@@ -277,14 +295,16 @@ def _render_page(
     available_languages: list[dict] | None = None,
 ) -> str:
     if not is_authenticated:
+        login_error = f'<p class="error">{_escape_html(error)}</p>' if error else ""
         body = """
         <form action="/login" method="post" class="panel">
           <label>Access token
             <input type="password" name="token" autocomplete="current-password" required autofocus>
           </label>
+          {login_error}
           <button type="submit">Continue</button>
         </form>
-        """
+        """.format(login_error=login_error)
     else:
         body = f"""
         <form action="/logout" method="post" class="logout"><button type="submit">Sign out</button></form>
