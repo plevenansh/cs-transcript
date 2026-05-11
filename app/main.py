@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from os import getenv
+from sys import stderr
 from time import perf_counter
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 from starlette.responses import RedirectResponse
 
@@ -32,7 +34,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        Base.metadata.create_all(bind=engine)
+        try:
+            Base.metadata.create_all(bind=engine)
+            app.state.database_ready = True
+        except SQLAlchemyError as exc:
+            app.state.database_ready = False
+            print(f"Database setup failed during startup: {exc}", file=stderr)
         yield
 
     app = FastAPI(
@@ -60,19 +67,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response = await call_next(request)
         if request.url.path.startswith("/api/"):
             duration_ms = int((perf_counter() - started_at) * 1000)
-            with session_scope(request.app.state.session_factory) as session:
-                session.add(
-                    ApiRequestLog(
-                        method=request.method,
-                        path=request.url.path,
-                        query=request.url.query,
-                        client_name=request.headers.get("x-client-name"),
-                        client_host=request.client.host if request.client else None,
-                        user_agent=request.headers.get("user-agent"),
-                        status_code=response.status_code,
-                        duration_ms=duration_ms,
+            try:
+                with session_scope(request.app.state.session_factory) as session:
+                    session.add(
+                        ApiRequestLog(
+                            method=request.method,
+                            path=request.url.path,
+                            query=request.url.query,
+                            client_name=request.headers.get("x-client-name"),
+                            client_host=request.client.host if request.client else None,
+                            user_agent=request.headers.get("user-agent"),
+                            status_code=response.status_code,
+                            duration_ms=duration_ms,
+                        )
                     )
-                )
+            except SQLAlchemyError as exc:
+                print(f"API request logging failed: {exc}", file=stderr)
         return response
 
     @app.get("/healthz")
@@ -110,6 +120,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "api_token_configured": bool(settings.normalized_api_token),
             "database_url_configured": bool(settings.database_url),
+            "database_ready": bool(getattr(app.state, "database_ready", False)),
             "proxy_configured": bool(
                 getenv("PROXY_URL")
                 or (getenv("WEBSHARE_PROXY_USERNAME") and getenv("WEBSHARE_PROXY_PASSWORD"))

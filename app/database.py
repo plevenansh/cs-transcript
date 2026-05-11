@@ -19,8 +19,16 @@ def normalize_database_url(url: str) -> str:
 
 
 def make_engine(database_url: str):
-    connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-    return create_engine(normalize_database_url(database_url), connect_args=connect_args)
+    connect_args = (
+        {"check_same_thread": False}
+        if database_url.startswith("sqlite")
+        else {"connect_timeout": 10}
+    )
+    return create_engine(
+        normalize_database_url(database_url),
+        connect_args=connect_args,
+        pool_pre_ping=True,
+    )
 
 
 def make_session_factory(database_url: str) -> sessionmaker[Session]:
