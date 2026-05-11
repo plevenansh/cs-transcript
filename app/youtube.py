@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from json import JSONDecodeError
 import re
 from os import getenv
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
 
+import requests
+from requests import exceptions as requests_exceptions
+from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
     CouldNotRetrieveTranscript,
@@ -124,31 +129,59 @@ def _fetch_segments(transcript):
     return transcript
 
 
-def _proxy_config_from_env():
+def _configured_proxy_url() -> str:
     proxy_url = (getenv("PROXY_URL") or "").strip()
     if proxy_url in {
         "http://username:password@proxy-host:port",
         "https://username:password@proxy-host:port",
     }:
         proxy_url = ""
+    return proxy_url
+
+
+def _webshare_proxy_config_from_env() -> WebshareProxyConfig | None:
+    webshare_username = (getenv("WEBSHARE_PROXY_USERNAME") or "").strip()
+    webshare_password = (getenv("WEBSHARE_PROXY_PASSWORD") or "").strip()
+    if not webshare_username or not webshare_password:
+        return None
+
+    countries = [
+        country.strip()
+        for country in getenv("WEBSHARE_PROXY_COUNTRIES", "").split(",")
+        if country.strip()
+    ]
+    try:
+        retries = int(getenv("WEBSHARE_PROXY_RETRIES", "10"))
+    except ValueError:
+        retries = 10
+    return WebshareProxyConfig(
+        proxy_username=webshare_username,
+        proxy_password=webshare_password,
+        filter_ip_locations=countries or None,
+        retries_when_blocked=retries,
+    )
+
+
+def _proxy_url_from_env() -> str | None:
+    proxy_url = _configured_proxy_url()
+    if proxy_url:
+        return proxy_url
+
+    webshare_config = _webshare_proxy_config_from_env()
+    if webshare_config is not None:
+        return webshare_config.url
+
+    return None
+
+
+def _proxy_config_from_env():
+    proxy_url = _configured_proxy_url()
     if proxy_url:
         return GenericProxyConfig(http_url=proxy_url, https_url=proxy_url)
 
-    webshare_username = getenv("WEBSHARE_PROXY_USERNAME")
-    webshare_password = getenv("WEBSHARE_PROXY_PASSWORD")
-    if webshare_username and webshare_password:
-        countries = [
-            country.strip()
-            for country in getenv("WEBSHARE_PROXY_COUNTRIES", "").split(",")
-            if country.strip()
-        ]
-        retries = int(getenv("WEBSHARE_PROXY_RETRIES", "10"))
-        return WebshareProxyConfig(
-            proxy_username=webshare_username,
-            proxy_password=webshare_password,
-            filter_ip_locations=countries or None,
-            retries_when_blocked=retries,
-        )
+    webshare_config = _webshare_proxy_config_from_env()
+    if webshare_config is not None:
+        return webshare_config
 
     return None
 
@@ -157,17 +190,206 @@ def _youtube_api() -> YouTubeTranscriptApi:
     return YouTubeTranscriptApi(proxy_config=_proxy_config_from_env())
 
 
+def _is_request_blocked(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "429",
+            "too many requests",
+            "too many 429",
+            "blocked",
+            "request blocked",
+            "ipblocked",
+            "unusual traffic",
+        )
+    )
+
+
+def _raise_transcript_error(video_id: str, exc: Exception):
+    if _is_request_blocked(exc):
+        raise YouTubeBlocked(video_id) from exc
+    raise TranscriptUnavailable(video_id) from exc
+
+
+def _build_plain_text(segments: list[dict]) -> str:
+    return " ".join(segment["text"].strip() for segment in segments if segment["text"].strip())
+
+
+def _fetch_via_transcript_api(video_id: str, languages: list[str], allow_any_language: bool) -> FetchedTranscript:
+    transcript_list = _list_transcripts(video_id)
+
+    try:
+        transcript = transcript_list.find_manually_created_transcript(languages)
+    except NoTranscriptFound:
+        try:
+            transcript = transcript_list.find_generated_transcript(languages)
+        except NoTranscriptFound as exc:
+            if not allow_any_language:
+                raise TranscriptUnavailable(video_id) from exc
+            transcript = _first_available_transcript(transcript_list, video_id)
+
+    try:
+        raw_segments = _fetch_segments(transcript)
+        segments = [_segment_to_dict(segment) for segment in raw_segments]
+    except (CouldNotRetrieveTranscript, requests_exceptions.RequestException) as exc:
+        _raise_transcript_error(video_id, exc)
+
+    return FetchedTranscript(
+        video_id=video_id,
+        language=getattr(transcript, "language", getattr(transcript, "language_code", languages[0])),
+        language_code=getattr(transcript, "language_code", languages[0]),
+        is_generated=bool(getattr(transcript, "is_generated", False)),
+        segments=segments,
+        text=_build_plain_text(segments),
+    )
+
+
+def _language_code_matches(requested: str, available: str) -> bool:
+    requested_value = requested.strip().lower()
+    available_value = available.strip().lower()
+    if requested_value == available_value:
+        return True
+    return requested_value.split("-")[0] == available_value.split("-")[0]
+
+
+def _pick_yt_dlp_format(formats: list[dict]) -> dict | None:
+    for format_info in formats:
+        if format_info.get("ext") == "json3" and format_info.get("url"):
+            return format_info
+    for format_info in formats:
+        if format_info.get("url"):
+            return format_info
+    return None
+
+
+def _select_yt_dlp_track(track_map: dict[str, list[dict]], languages: list[str], allow_any_language: bool):
+    for requested_language in languages:
+        for language_code, formats in track_map.items():
+            if not _language_code_matches(requested_language, language_code):
+                continue
+            selected_format = _pick_yt_dlp_format(formats)
+            if selected_format is not None:
+                return language_code, selected_format
+
+    if not allow_any_language:
+        return None
+
+    for language_code, formats in track_map.items():
+        selected_format = _pick_yt_dlp_format(formats)
+        if selected_format is not None:
+            return language_code, selected_format
+
+    return None
+
+
+def _caption_segments_from_json3(payload: dict) -> list[dict]:
+    segments: list[dict] = []
+    for event in payload.get("events", []):
+        start_ms = event.get("tStartMs")
+        if start_ms is None:
+            continue
+
+        text = "".join(segment.get("utf8", "") for segment in event.get("segs", []))
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            continue
+
+        duration_ms = event.get("dDurationMs") or 0
+        segments.append(
+            {
+                "text": text,
+                "start": float(start_ms) / 1000,
+                "duration": float(duration_ms) / 1000,
+            }
+        )
+    return segments
+
+
+def _fetch_yt_dlp_payload(video_id: str, languages: list[str], allow_any_language: bool, proxy_url: str | None) -> FetchedTranscript:
+    options = {
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+    }
+    if proxy_url:
+        options["proxy"] = proxy_url
+
+    with YoutubeDL(options) as downloader:
+        info = downloader.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+
+    manual_tracks = info.get("subtitles") or {}
+    automatic_tracks = info.get("automatic_captions") or {}
+
+    selected_track = _select_yt_dlp_track(manual_tracks, languages, allow_any_language)
+    is_generated = False
+    if selected_track is None:
+        selected_track = _select_yt_dlp_track(automatic_tracks, languages, allow_any_language)
+        is_generated = True
+    if selected_track is None:
+        raise TranscriptUnavailable(video_id)
+
+    language_code, format_info = selected_track
+    request_kwargs = {"timeout": 30}
+    if proxy_url:
+        request_kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
+
+    response = requests.get(format_info["url"], **request_kwargs)
+    if response.status_code == 429:
+        raise YouTubeBlocked(video_id)
+    response.raise_for_status()
+
+    try:
+        payload = response.json()
+    except JSONDecodeError as exc:
+        _raise_transcript_error(video_id, exc)
+
+    segments = _caption_segments_from_json3(payload)
+    if not segments:
+        raise TranscriptUnavailable(video_id)
+
+    return FetchedTranscript(
+        video_id=video_id,
+        language=str(format_info.get("name") or language_code),
+        language_code=language_code,
+        is_generated=is_generated,
+        segments=segments,
+        text=_build_plain_text(segments),
+    )
+
+
+def _fetch_via_yt_dlp(video_id: str, languages: list[str], allow_any_language: bool) -> FetchedTranscript:
+    last_error: Exception | None = None
+    proxy_candidates: list[str | None] = [None]
+    configured_proxy = _proxy_url_from_env()
+    if configured_proxy and configured_proxy not in proxy_candidates:
+        proxy_candidates.append(configured_proxy)
+
+    for proxy_url in proxy_candidates:
+        try:
+            return _fetch_yt_dlp_payload(video_id, languages, allow_any_language, proxy_url)
+        except TranscriptUnavailable as exc:
+            last_error = exc
+        except (DownloadError, requests_exceptions.RequestException, YouTubeBlocked) as exc:
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        if isinstance(last_error, TranscriptUnavailable):
+            raise last_error
+        _raise_transcript_error(video_id, last_error)
+
+    raise TranscriptUnavailable(video_id)
+
+
 def _list_transcripts(video_id: str):
     api = _youtube_api()
     try:
         return api.list(video_id)
     except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable) as exc:
         raise TranscriptUnavailable(video_id) from exc
-    except CouldNotRetrieveTranscript as exc:
-        message = str(exc).lower()
-        if "blocked" in message or "ip" in message or "request blocked" in message:
-            raise YouTubeBlocked(video_id) from exc
-        raise TranscriptUnavailable(video_id) from exc
+    except (CouldNotRetrieveTranscript, requests_exceptions.RequestException) as exc:
+        _raise_transcript_error(video_id, exc)
 
 
 def list_available_transcripts(video_id: str) -> list[AvailableTranscript]:
@@ -184,36 +406,15 @@ def list_available_transcripts(video_id: str) -> list[AvailableTranscript]:
 
 
 def fetch_transcript(video_id: str, languages: list[str], allow_any_language: bool = False) -> FetchedTranscript:
-    transcript_list = _list_transcripts(video_id)
-
     try:
-        transcript = transcript_list.find_manually_created_transcript(languages)
-    except NoTranscriptFound:
+        return _fetch_via_transcript_api(video_id, languages, allow_any_language)
+    except YouTubeBlocked:
         try:
-            transcript = transcript_list.find_generated_transcript(languages)
-        except NoTranscriptFound as exc:
-            if not allow_any_language:
-                raise TranscriptUnavailable(video_id) from exc
-            transcript = _first_available_transcript(transcript_list, video_id)
-
-    try:
-        raw_segments = _fetch_segments(transcript)
-        segments = [_segment_to_dict(segment) for segment in raw_segments]
-    except CouldNotRetrieveTranscript as exc:
-        message = str(exc).lower()
-        if "blocked" in message or "ip" in message or "request blocked" in message:
-            raise YouTubeBlocked(video_id) from exc
-        raise TranscriptUnavailable(video_id) from exc
-
-    plain_text = " ".join(segment["text"].strip() for segment in segments if segment["text"].strip())
-    return FetchedTranscript(
-        video_id=video_id,
-        language=getattr(transcript, "language", getattr(transcript, "language_code", languages[0])),
-        language_code=getattr(transcript, "language_code", languages[0]),
-        is_generated=bool(getattr(transcript, "is_generated", False)),
-        segments=segments,
-        text=plain_text,
-    )
+            return _fetch_via_yt_dlp(video_id, languages, allow_any_language)
+        except TranscriptUnavailable:
+            raise
+        except TranscriptServiceError:
+            raise
 
 
 def _first_available_transcript(transcript_list, video_id: str):
