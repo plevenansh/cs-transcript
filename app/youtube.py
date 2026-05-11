@@ -333,7 +333,7 @@ def _fetch_yt_dlp_payload(video_id: str, languages: list[str], allow_any_languag
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+        "extractor_args": {"youtube": {"player_client": ["android", "tv_embedded", "web"]}},
     }
     if proxy_url:
         options["proxy"] = proxy_url
@@ -344,11 +344,18 @@ def _fetch_yt_dlp_payload(video_id: str, languages: list[str], allow_any_languag
     manual_tracks = info.get("subtitles") or {}
     automatic_tracks = info.get("automatic_captions") or {}
 
-    selected_track = _select_yt_dlp_track(manual_tracks, languages, allow_any_language)
+    # Prefer requested language in manual, then automatic, then any-language fallback.
     is_generated = False
+    selected_track = _select_yt_dlp_track(manual_tracks, languages, allow_any_language=False)
     if selected_track is None:
-        selected_track = _select_yt_dlp_track(automatic_tracks, languages, allow_any_language)
+        selected_track = _select_yt_dlp_track(automatic_tracks, languages, allow_any_language=False)
         is_generated = True
+    if selected_track is None and allow_any_language:
+        selected_track = _select_yt_dlp_track(automatic_tracks, languages, allow_any_language=True)
+        is_generated = True
+    if selected_track is None and allow_any_language:
+        selected_track = _select_yt_dlp_track(manual_tracks, languages, allow_any_language=True)
+        is_generated = False
     if selected_track is None:
         raise TranscriptUnavailable(video_id)
 
@@ -397,9 +404,9 @@ def _fetch_via_yt_dlp(video_id: str, languages: list[str], allow_any_language: b
     configured_proxy = _unfiltered_proxy_url_from_env()
     if configured_proxy:
         try:
-            proxy_retries = int(getenv("YTDLP_PROXY_RETRIES", "4"))
+            proxy_retries = int(getenv("YTDLP_PROXY_RETRIES", "10"))
         except ValueError:
-            proxy_retries = 4
+            proxy_retries = 10
 
         for _ in range(proxy_retries):
             try:
