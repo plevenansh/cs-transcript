@@ -202,6 +202,10 @@ def _is_request_blocked(exc: Exception) -> bool:
             "request blocked",
             "ipblocked",
             "unusual traffic",
+            "sign in to confirm",
+            "not a bot",
+            "please sign in",
+            "confirm you",
         )
     )
 
@@ -311,6 +315,7 @@ def _fetch_yt_dlp_payload(video_id: str, languages: list[str], allow_any_languag
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
+        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
     }
     if proxy_url:
         options["proxy"] = proxy_url
@@ -360,19 +365,32 @@ def _fetch_yt_dlp_payload(video_id: str, languages: list[str], allow_any_languag
 
 def _fetch_via_yt_dlp(video_id: str, languages: list[str], allow_any_language: bool) -> FetchedTranscript:
     last_error: Exception | None = None
-    proxy_candidates: list[str | None] = [None]
-    configured_proxy = _proxy_url_from_env()
-    if configured_proxy and configured_proxy not in proxy_candidates:
-        proxy_candidates.append(configured_proxy)
 
-    for proxy_url in proxy_candidates:
+    # First attempt: direct connection (no proxy)
+    try:
+        return _fetch_yt_dlp_payload(video_id, languages, allow_any_language, None)
+    except TranscriptUnavailable as exc:
+        last_error = exc
+    except (DownloadError, requests_exceptions.RequestException, YouTubeBlocked) as exc:
+        last_error = exc
+
+    # Retry with rotating proxy — each attempt hits a different IP in the pool
+    configured_proxy = _proxy_url_from_env()
+    if configured_proxy:
         try:
-            return _fetch_yt_dlp_payload(video_id, languages, allow_any_language, proxy_url)
-        except TranscriptUnavailable as exc:
-            last_error = exc
-        except (DownloadError, requests_exceptions.RequestException, YouTubeBlocked) as exc:
-            last_error = exc
-            continue
+            proxy_retries = int(getenv("YTDLP_PROXY_RETRIES", "4"))
+        except ValueError:
+            proxy_retries = 4
+
+        for _ in range(proxy_retries):
+            try:
+                return _fetch_yt_dlp_payload(video_id, languages, allow_any_language, configured_proxy)
+            except TranscriptUnavailable as exc:
+                last_error = exc
+                break  # No captions available; retrying won't help
+            except (DownloadError, requests_exceptions.RequestException, YouTubeBlocked) as exc:
+                last_error = exc
+                continue
 
     if last_error is not None:
         if isinstance(last_error, TranscriptUnavailable):
