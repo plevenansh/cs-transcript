@@ -1,8 +1,18 @@
 from __future__ import annotations
 
 import pytest
+from requests.exceptions import RetryError
 
-from app.youtube import _proxy_config_from_env, extract_video_id, normalize_languages
+from app.youtube import (
+    FetchedTranscript,
+    YouTubeBlocked,
+    _caption_segments_from_json3,
+    _proxy_config_from_env,
+    extract_video_id,
+    fetch_transcript,
+    list_available_transcripts,
+    normalize_languages,
+)
 
 
 @pytest.mark.parametrize(
@@ -43,3 +53,58 @@ def test_placeholder_proxy_url_is_ignored(monkeypatch):
     monkeypatch.delenv("WEBSHARE_PROXY_USERNAME", raising=False)
     monkeypatch.delenv("WEBSHARE_PROXY_PASSWORD", raising=False)
     assert _proxy_config_from_env() is None
+
+
+def test_list_available_transcripts_maps_retry_error_to_blocked(monkeypatch):
+    class FakeApi:
+        def list(self, video_id):
+            raise RetryError("too many 429 error responses")
+
+    monkeypatch.setattr("app.youtube._youtube_api", lambda: FakeApi())
+
+    with pytest.raises(YouTubeBlocked):
+        list_available_transcripts("dQw4w9WgXcQ")
+
+
+def test_fetch_transcript_falls_back_to_ytdlp_when_primary_backend_is_blocked(monkeypatch):
+    def fake_primary(video_id, languages, allow_any_language):
+        raise YouTubeBlocked(video_id)
+
+    def fake_fallback(video_id, languages, allow_any_language):
+        return FetchedTranscript(
+            video_id=video_id,
+            language="English",
+            language_code="en",
+            is_generated=False,
+            segments=[{"text": "Fallback", "start": 0.0, "duration": 1.0}],
+            text="Fallback",
+        )
+
+    monkeypatch.setattr("app.youtube._fetch_via_transcript_api", fake_primary)
+    monkeypatch.setattr("app.youtube._fetch_via_yt_dlp", fake_fallback)
+
+    fetched = fetch_transcript("dQw4w9WgXcQ", ["en"])
+
+    assert fetched.text == "Fallback"
+    assert fetched.language_code == "en"
+
+
+def test_caption_segments_from_json3_normalizes_text():
+    payload = {
+        "events": [
+            {
+                "tStartMs": 1250,
+                "dDurationMs": 2750,
+                "segs": [{"utf8": "Hello\n"}, {"utf8": "world"}],
+            },
+            {
+                "tStartMs": 5000,
+                "dDurationMs": 0,
+                "segs": [{"utf8": "   "}],
+            },
+        ]
+    }
+
+    assert _caption_segments_from_json3(payload) == [
+        {"text": "Hello world", "start": 1.25, "duration": 2.75}
+    ]
