@@ -174,6 +174,24 @@ def _proxy_url_from_env() -> str | None:
     return None
 
 
+def _unfiltered_proxy_url_from_env() -> str | None:
+    """Return a Webshare proxy URL without country filters for a larger IP pool."""
+    proxy_url = _configured_proxy_url()
+    if proxy_url:
+        return proxy_url
+
+    webshare_username = (getenv("WEBSHARE_PROXY_USERNAME") or "").strip()
+    webshare_password = (getenv("WEBSHARE_PROXY_PASSWORD") or "").strip()
+    if not webshare_username or not webshare_password:
+        return None
+
+    unfiltered = WebshareProxyConfig(
+        proxy_username=webshare_username,
+        proxy_password=webshare_password,
+    )
+    return unfiltered.url
+
+
 def _proxy_config_from_env():
     proxy_url = _configured_proxy_url()
     if proxy_url:
@@ -374,8 +392,9 @@ def _fetch_via_yt_dlp(video_id: str, languages: list[str], allow_any_language: b
     except (DownloadError, requests_exceptions.RequestException, YouTubeBlocked) as exc:
         last_error = exc
 
-    # Retry with rotating proxy — each attempt hits a different IP in the pool
-    configured_proxy = _proxy_url_from_env()
+    # Retry with rotating proxy — each attempt hits a different IP in the pool.
+    # Use the unfiltered (global) proxy pool for maximum IP diversity.
+    configured_proxy = _unfiltered_proxy_url_from_env()
     if configured_proxy:
         try:
             proxy_retries = int(getenv("YTDLP_PROXY_RETRIES", "4"))
