@@ -224,6 +224,9 @@ def _get_cookies_file() -> str | None:
     cookies_content = _normalize_cookies_content((getenv("YOUTUBE_COOKIES") or "").strip())
     if not cookies_content:
         return None
+    # yt-dlp requires a Netscape HTTP Cookie File header to recognize the file format.
+    if not cookies_content.startswith("# Netscape HTTP Cookie File") and not cookies_content.startswith("# HTTP Cookie File"):
+        cookies_content = "# Netscape HTTP Cookie File\n" + cookies_content
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
     tmp.write(cookies_content)
     tmp.close()

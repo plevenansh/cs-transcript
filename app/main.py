@@ -120,6 +120,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "session_cookies": len(session.cookies) if session else 0,
             "cookies_file": cookies_file,
             "cookies_file_size": _os.path.getsize(cookies_file) if cookies_file and _os.path.exists(cookies_file) else 0,
+            "cookies_file_first_line": open(cookies_file).readline().strip() if cookies_file and _os.path.exists(cookies_file) else None,
         }
 
     @app.get("/debug/fetch/{video_id}", dependencies=[Depends(require_api_token)])
