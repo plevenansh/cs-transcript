@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from json import JSONDecodeError
-import http.cookiejar
 import os
 import re
 import tempfile
@@ -207,6 +206,13 @@ def _proxy_config_from_env():
     return None
 
 
+def _normalize_cookies_content(content: str) -> str:
+    """Handle Railway env vars that may store newlines as literal \\n sequences."""
+    if "\n" not in content and "\\n" in content:
+        content = content.replace("\\n", "\n")
+    return content
+
+
 _cached_cookies_file: str | None = None
 
 
@@ -215,7 +221,7 @@ def _get_cookies_file() -> str | None:
     global _cached_cookies_file
     if _cached_cookies_file is not None:
         return _cached_cookies_file if os.path.exists(_cached_cookies_file) else None
-    cookies_content = (getenv("YOUTUBE_COOKIES") or "").strip()
+    cookies_content = _normalize_cookies_content((getenv("YOUTUBE_COOKIES") or "").strip())
     if not cookies_content:
         return None
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
@@ -226,20 +232,26 @@ def _get_cookies_file() -> str | None:
 
 
 def _make_cookie_session() -> requests.Session | None:
-    """Build a requests.Session pre-loaded with YouTube cookies from env, if set."""
-    cookies_content = (getenv("YOUTUBE_COOKIES") or "").strip()
+    """Build a requests.Session with YouTube cookies parsed directly from env."""
+    cookies_content = _normalize_cookies_content((getenv("YOUTUBE_COOKIES") or "").strip())
     if not cookies_content:
         return None
-    jar = http.cookiejar.MozillaCookieJar()
-    cookies_file = _get_cookies_file()
-    if cookies_file:
-        try:
-            jar.load(cookies_file, ignore_discard=True, ignore_expires=True)
-        except Exception:
-            return None
     session = requests.Session()
-    session.cookies = jar  # type: ignore[assignment]
-    return session
+    loaded = 0
+    for line in cookies_content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        domain, _flag, path, _secure, _expiry, name, value = parts[:7]
+        try:
+            session.cookies.set(name, value, domain=domain, path=path)
+            loaded += 1
+        except Exception:
+            continue
+    return session if loaded > 0 else None
 
 
 def _youtube_api() -> YouTubeTranscriptApi:
