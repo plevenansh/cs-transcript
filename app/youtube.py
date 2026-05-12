@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from json import JSONDecodeError
+import http.cookiejar
 import os
 import re
 import tempfile
@@ -224,8 +225,29 @@ def _get_cookies_file() -> str | None:
     return _cached_cookies_file
 
 
+def _make_cookie_session() -> requests.Session | None:
+    """Build a requests.Session pre-loaded with YouTube cookies from env, if set."""
+    cookies_content = (getenv("YOUTUBE_COOKIES") or "").strip()
+    if not cookies_content:
+        return None
+    jar = http.cookiejar.MozillaCookieJar()
+    cookies_file = _get_cookies_file()
+    if cookies_file:
+        try:
+            jar.load(cookies_file, ignore_discard=True, ignore_expires=True)
+        except Exception:
+            return None
+    session = requests.Session()
+    session.cookies = jar  # type: ignore[assignment]
+    return session
+
+
 def _youtube_api() -> YouTubeTranscriptApi:
-    return YouTubeTranscriptApi(proxy_config=_proxy_config_from_env())
+    session = _make_cookie_session()
+    return YouTubeTranscriptApi(
+        proxy_config=_proxy_config_from_env(),
+        http_client=session,
+    )
 
 
 def _is_request_blocked(exc: Exception) -> bool:
@@ -353,6 +375,7 @@ def _fetch_yt_dlp_payload(video_id: str, languages: list[str], allow_any_languag
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
+        "ignore_no_formats_error": True,
         "extractor_args": {"youtube": {"player_client": ["android", "tv_embedded", "web"]}},
     }
     if proxy_url:
@@ -363,6 +386,9 @@ def _fetch_yt_dlp_payload(video_id: str, languages: list[str], allow_any_languag
 
     with YoutubeDL(options) as downloader:
         info = downloader.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+
+    if info is None:
+        raise TranscriptUnavailable(video_id)
 
     manual_tracks = info.get("subtitles") or {}
     automatic_tracks = info.get("automatic_captions") or {}
@@ -383,7 +409,7 @@ def _fetch_yt_dlp_payload(video_id: str, languages: list[str], allow_any_languag
         raise TranscriptUnavailable(video_id)
 
     language_code, format_info = selected_track
-    request_kwargs = {"timeout": 30}
+    request_kwargs: dict = {"timeout": 30}
     if proxy_url:
         request_kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
 
@@ -414,13 +440,23 @@ def _fetch_yt_dlp_payload(video_id: str, languages: list[str], allow_any_languag
 def _fetch_via_yt_dlp(video_id: str, languages: list[str], allow_any_language: bool) -> FetchedTranscript:
     last_error: Exception | None = None
 
-    # First attempt: direct connection (no proxy)
+    # First attempt: direct connection (no proxy).
+    # When cookies are configured this handles bot-detection bypass on Railway.
     try:
         return _fetch_yt_dlp_payload(video_id, languages, allow_any_language, None)
     except TranscriptUnavailable as exc:
         last_error = exc
     except (DownloadError, requests_exceptions.RequestException, YouTubeBlocked) as exc:
         last_error = exc
+
+    # If cookies are configured, proxy IPs return no subtitle data even when auth works.
+    # Skip proxy retries entirely to avoid wasting time.
+    if _get_cookies_file():
+        if last_error is not None:
+            if isinstance(last_error, TranscriptUnavailable):
+                raise last_error
+            _raise_transcript_error(video_id, last_error)
+        raise TranscriptUnavailable(video_id)
 
     # Retry with rotating proxy — each attempt hits a different IP in the pool.
     # Use the unfiltered (global) proxy pool for maximum IP diversity.
