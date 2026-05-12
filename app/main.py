@@ -20,6 +20,9 @@ from app.schemas import ErrorResponse
 from app.service import get_or_fetch_transcript, get_uncached_transcript
 from app.youtube import (
     TranscriptServiceError,
+    _get_cookies_file,
+    _make_cookie_session,
+    _normalize_cookies_content,
     extract_video_id,
     is_explicit_language_request,
     list_available_transcripts,
@@ -88,6 +91,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/debug/cookies", dependencies=[Depends(require_api_token)])
+    def debug_cookies() -> dict:
+        raw = getenv("YOUTUBE_COOKIES") or ""
+        normalized = _normalize_cookies_content(raw.strip())
+        cookie_count = 0
+        cookie_names: list[str] = []
+        for line in normalized.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 7:
+                cookie_count += 1
+                cookie_names.append(parts[5])  # name field
+        session = _make_cookie_session()
+        cookies_file = _get_cookies_file()
+        import os as _os
+        return {
+            "env_var_set": bool(raw),
+            "env_var_length": len(raw),
+            "has_real_newlines": "\n" in raw,
+            "has_literal_backslash_n": "\\n" in raw,
+            "normalized_length": len(normalized),
+            "cookies_parsed": cookie_count,
+            "cookie_names": cookie_names,
+            "session_cookies": len(session.cookies) if session else 0,
+            "cookies_file": cookies_file,
+            "cookies_file_size": _os.path.getsize(cookies_file) if cookies_file and _os.path.exists(cookies_file) else 0,
+        }
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
