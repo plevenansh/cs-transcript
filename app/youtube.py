@@ -387,7 +387,6 @@ def _fetch_yt_dlp_payload(video_id: str, languages: list[str], allow_any_languag
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
-        "ignore_no_formats_error": True,
         "extractor_args": {"youtube": {"player_client": ["android", "tv_embedded", "web"]}},
     }
     if proxy_url:
@@ -460,15 +459,6 @@ def _fetch_via_yt_dlp(video_id: str, languages: list[str], allow_any_language: b
         last_error = exc
     except (DownloadError, requests_exceptions.RequestException, YouTubeBlocked) as exc:
         last_error = exc
-
-    # If cookies are configured, proxy IPs return no subtitle data even when auth works.
-    # Skip proxy retries entirely to avoid wasting time.
-    if _get_cookies_file():
-        if last_error is not None:
-            if isinstance(last_error, TranscriptUnavailable):
-                raise last_error
-            _raise_transcript_error(video_id, last_error)
-        raise TranscriptUnavailable(video_id)
 
     # Retry with rotating proxy — each attempt hits a different IP in the pool.
     # Use the unfiltered (global) proxy pool for maximum IP diversity.
