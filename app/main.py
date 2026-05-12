@@ -127,17 +127,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from app.youtube import (
             _list_transcripts,
             _fetch_yt_dlp_payload,
+            _fetch_segments,
+            _segment_to_dict,
             YouTubeBlocked,
             TranscriptUnavailable,
         )
         result: dict = {}
 
-        # Test primary API path
+        # Test primary API path - list then fetch
         try:
             transcript_list = _list_transcripts(video_id)
             available = [{"code": t.language_code, "generated": t.is_generated} for t in transcript_list]
             result["primary_api_list"] = "success"
             result["primary_api_transcripts"] = available
+
+            # Try to actually fetch the first available transcript
+            for t in transcript_list:
+                try:
+                    raw = _fetch_segments(t)
+                    segments = [_segment_to_dict(s) for s in raw]
+                    result["primary_api_fetch"] = "success"
+                    result["primary_api_fetch_lang"] = t.language_code
+                    result["primary_api_fetch_segments"] = len(segments)
+                    break
+                except Exception as e:
+                    result["primary_api_fetch"] = "error"
+                    result["primary_api_fetch_error"] = f"{type(e).__name__}: {e}"
+                    break
         except YouTubeBlocked as e:
             result["primary_api_list"] = "youtube_blocked"
             result["primary_api_error"] = str(e)
