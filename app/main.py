@@ -20,9 +20,6 @@ from app.schemas import ErrorResponse
 from app.service import get_or_fetch_transcript, get_uncached_transcript
 from app.youtube import (
     TranscriptServiceError,
-    _get_cookies_file,
-    _make_cookie_session,
-    _normalize_cookies_content,
     extract_video_id,
     is_explicit_language_request,
     list_available_transcripts,
@@ -91,97 +88,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
-
-    @app.get("/debug/cookies", dependencies=[Depends(require_api_token)])
-    def debug_cookies() -> dict:
-        raw = getenv("YOUTUBE_COOKIES") or ""
-        normalized = _normalize_cookies_content(raw.strip())
-        cookie_count = 0
-        cookie_names: list[str] = []
-        for line in normalized.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("\t")
-            if len(parts) >= 7:
-                cookie_count += 1
-                cookie_names.append(parts[5])  # name field
-        session = _make_cookie_session()
-        cookies_file = _get_cookies_file()
-        import os as _os
-        return {
-            "env_var_set": bool(raw),
-            "env_var_length": len(raw),
-            "has_real_newlines": "\n" in raw,
-            "has_literal_backslash_n": "\\n" in raw,
-            "normalized_length": len(normalized),
-            "cookies_parsed": cookie_count,
-            "cookie_names": cookie_names,
-            "session_cookies": len(session.cookies) if session else 0,
-            "cookies_file": cookies_file,
-            "cookies_file_size": _os.path.getsize(cookies_file) if cookies_file and _os.path.exists(cookies_file) else 0,
-            "cookies_file_first_line": open(cookies_file).readline().strip() if cookies_file and _os.path.exists(cookies_file) else None,
-        }
-
-    @app.get("/debug/fetch/{video_id}", dependencies=[Depends(require_api_token)])
-    def debug_fetch(video_id: str) -> dict:
-        from app.youtube import (
-            _list_transcripts,
-            _fetch_yt_dlp_payload,
-            _fetch_segments,
-            _segment_to_dict,
-            YouTubeBlocked,
-            TranscriptUnavailable,
-        )
-        result: dict = {}
-
-        # Test primary API path - list then fetch
-        try:
-            transcript_list = _list_transcripts(video_id)
-            available = [{"code": t.language_code, "generated": t.is_generated} for t in transcript_list]
-            result["primary_api_list"] = "success"
-            result["primary_api_transcripts"] = available
-
-            # Try to actually fetch the first available transcript
-            for t in transcript_list:
-                try:
-                    raw = _fetch_segments(t)
-                    segments = [_segment_to_dict(s) for s in raw]
-                    result["primary_api_fetch"] = "success"
-                    result["primary_api_fetch_lang"] = t.language_code
-                    result["primary_api_fetch_segments"] = len(segments)
-                    break
-                except Exception as e:
-                    result["primary_api_fetch"] = "error"
-                    result["primary_api_fetch_error"] = f"{type(e).__name__}: {e}"
-                    break
-        except YouTubeBlocked as e:
-            result["primary_api_list"] = "youtube_blocked"
-            result["primary_api_error"] = str(e)
-        except TranscriptUnavailable as e:
-            result["primary_api_list"] = "transcript_unavailable"
-            result["primary_api_error"] = str(e)
-        except Exception as e:
-            result["primary_api_list"] = "error"
-            result["primary_api_error"] = f"{type(e).__name__}: {e}"
-
-        # Test yt-dlp direct (no proxy)
-        try:
-            fetched = _fetch_yt_dlp_payload(video_id, ["en"], True, None)
-            result["ytdlp_direct"] = "success"
-            result["ytdlp_direct_segments"] = len(fetched.segments)
-            result["ytdlp_direct_lang"] = fetched.language_code
-        except YouTubeBlocked as e:
-            result["ytdlp_direct"] = "youtube_blocked"
-            result["ytdlp_direct_error"] = str(e)
-        except TranscriptUnavailable as e:
-            result["ytdlp_direct"] = "transcript_unavailable"
-            result["ytdlp_direct_error"] = str(e)
-        except Exception as e:
-            result["ytdlp_direct"] = "error"
-            result["ytdlp_direct_error"] = f"{type(e).__name__}: {e}"
-
-        return result
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
