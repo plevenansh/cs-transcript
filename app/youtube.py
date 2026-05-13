@@ -259,8 +259,11 @@ def _make_cookie_session() -> requests.Session | None:
 
 def _youtube_api() -> YouTubeTranscriptApi:
     session = _make_cookie_session()
+    # When cookies are configured, skip the proxy — YouTube authenticates
+    # via cookies directly and proxy IPs only cause 429 rate-limits.
+    proxy = None if session is not None else _proxy_config_from_env()
     return YouTubeTranscriptApi(
-        proxy_config=_proxy_config_from_env(),
+        proxy_config=proxy,
         http_client=session,
     )
 
@@ -454,8 +457,17 @@ def _fetch_yt_dlp_payload(video_id: str, languages: list[str], allow_any_languag
 def _fetch_via_yt_dlp(video_id: str, languages: list[str], allow_any_language: bool) -> FetchedTranscript:
     last_error: Exception | None = None
 
-    # First attempt: direct connection (no proxy).
-    # When cookies are configured this handles bot-detection bypass on Railway.
+    # When cookies are set, go direct — no proxy.
+    # Cookies authenticate with YouTube; adding a proxy only causes bot-blocks.
+    if _get_cookies_file():
+        try:
+            return _fetch_yt_dlp_payload(video_id, languages, allow_any_language, None)
+        except TranscriptUnavailable as exc:
+            raise
+        except (DownloadError, requests_exceptions.RequestException, YouTubeBlocked) as exc:
+            _raise_transcript_error(video_id, exc)
+
+    # No cookies — retry with rotating proxy pool.
     try:
         return _fetch_yt_dlp_payload(video_id, languages, allow_any_language, None)
     except TranscriptUnavailable as exc:
@@ -463,8 +475,6 @@ def _fetch_via_yt_dlp(video_id: str, languages: list[str], allow_any_language: b
     except (DownloadError, requests_exceptions.RequestException, YouTubeBlocked) as exc:
         last_error = exc
 
-    # Retry with rotating proxy — each attempt hits a different IP in the pool.
-    # Use the unfiltered (global) proxy pool for maximum IP diversity.
     configured_proxy = _unfiltered_proxy_url_from_env()
     if configured_proxy:
         try:
@@ -477,7 +487,7 @@ def _fetch_via_yt_dlp(video_id: str, languages: list[str], allow_any_language: b
                 return _fetch_yt_dlp_payload(video_id, languages, allow_any_language, configured_proxy)
             except TranscriptUnavailable as exc:
                 last_error = exc
-                break  # No captions available; retrying won't help
+                break
             except (DownloadError, requests_exceptions.RequestException, YouTubeBlocked) as exc:
                 last_error = exc
                 continue
